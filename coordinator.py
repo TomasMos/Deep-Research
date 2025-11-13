@@ -9,6 +9,7 @@ from models import SearchResult
 from research_agents.search_agent import search_agent
 from research_agents.query_agent import query_agent
 from research_agents.synthesis_agent import synthesis_agent
+from research_agents.follow_up_agent import follow_up_decision_agent, FollowUpDecisionResponse
 from research_agents.query_agent import QueryResponse
 from ddgs import DDGS
 from rich.markdown import Markdown
@@ -19,6 +20,8 @@ class ResearchCoordinator:
     def __init__(self, query: str):
         self.query = query
         self.search_results = []
+        self.iteration = 1
+        self.findings = []
     
     async def research(self) -> str:
         with trace("Deep Research Workflow"):
@@ -26,6 +29,21 @@ class ResearchCoordinator:
 
             # Pass list of queries to perform_research_for_queries
             await self.perform_research_for_queries(query_response.final_output.queries)
+
+            while self.iteration < 3: 
+                decision_reponse = await self.generate_follow_up()
+
+                if not decision_reponse.should_follow_up:
+                    console.print("[cyan]No more research needed. Synthesizing report...[/cyan]")
+                    break
+                
+                self.iteration += 1
+                console.print(f"[cyan]Conducting follow up research. Iteration: {self.iteration}[/cyan]")
+                
+                await self.perform_research_for_queries(queries=decision_reponse.queries)    
+
+
+
 
             final_report = await self.synthesis_report()
 
@@ -51,7 +69,7 @@ class ResearchCoordinator:
             
     async def duckduckgo_search(self, query: str):
         try:
-            results = DDGS().text(query, region="us-en", safesearch="Off", timelimit="y", max_results=1)
+            results = DDGS().text(query, region="us-en", safesearch="Off", timelimit="y", max_results=3)
             return results
         except Exception as ex:
             console.print(f"[bold red]Search error: [/bold red] {str(ex)}")
@@ -101,5 +119,24 @@ class ResearchCoordinator:
                 findings_text += f"\n{i}. Title: {result.title}\n    URL: {result.url}\n    Summary: {result.summary}\n"
             
             result = await Runner.run(synthesis_agent, input=findings_text)
+
+            return result.final_output
+    
+    async def generate_follow_up(self) -> FollowUpDecisionResponse:
+        with console.status("[bold cyan]Evaluating if more research is needed...[/bold cyan]") as status:
+            findings_text = f"Original Query: {self.query}\n\nCurrent Findings:\n"
+            for i, result in enumerate(self.search_results, 1):
+                findings_text += f"\n{i}. Title: {result.title}\n   URL: {result.url}\n   Summary: {result.summary}\n"
+
+            result = await Runner.run(follow_up_decision_agent, input=findings_text)
+
+            console.print(Panel(f"[bold cyan]Follow-up Decision[/bold cyan]"))
+            console.print(f"[yellow]Decision:[/yellow] {'More research needed' if result.final_output.should_follow_up else 'Research complete'}")
+            console.print(f"[yellow]Reasoning:[/yellow] {result.final_output.reasoning}")
+
+            if result.final_output.should_follow_up:
+                console.print("\n[yellow]Follow-up Queries:[/yellow]")
+                for i, query in enumerate(result.final_output.queries, 1):
+                    console.print(f"  {i}. {query}")
 
             return result.final_output
